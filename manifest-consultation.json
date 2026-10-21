@@ -1,0 +1,15 @@
+{
+  "name": "Planning - Pointeuse Hulotte",
+  "short_name": "Planning",
+  "start_url": "./consultation.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#12161d",
+  "theme_color": "#12161d",
+  "icons": [
+    { "src": "icon-192-consultation.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512-consultation.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-512-consultation-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

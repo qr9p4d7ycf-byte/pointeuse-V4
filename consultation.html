@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Planning — Pointeuse Hulotte</title>
+<link rel="manifest" href="manifest-consultation.json">
+<meta name="theme-color" content="#12161d">
+<link rel="icon" href="icon-192-consultation.png">
+<link rel="apple-touch-icon" href="icon-192-consultation.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Planning">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<link rel="stylesheet" href="styles.css?v=33">
+<script>window.FORCE_CONSULTATION = true;</script>
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span><div><h1>Pointeuse Hulotte</h1><div class="brand-sub">by Sam · v3.3</div></div></div>
+    <div class="clock"><div class="time mono" id="liveTime">--:--:--</div><div class="date" id="liveDate">-</div></div>
+  </header>
+
+  <nav class="tabs" id="tabsNav"></nav>
+
+  <main id="mainArea"></main>
+</div>
+
+<script type="module" src="app.js?v=33"></script>
+</body>
+</html>
