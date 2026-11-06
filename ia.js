@@ -4,7 +4,7 @@
    continue de fonctionner normalement (sans l'onglet Équipe).
    ============================================================ */
 let C = null; // contexte fourni par app.js
-
+ 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODELS_URL = 'https://api.groq.com/openai/v1/models';
 const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
@@ -20,10 +20,10 @@ const TYPE_LABEL_EMP = {
   conge:'Congé', absent:'Je suis absent(e)', travaille:'Je souhaite travailler',
   non_travaille:'Je préfère ne pas travailler', pref:'Autre remarque / préférence'
 };
-
+ 
 const S = {
   keys: [], model: DEFAULT_MODEL,
-  settings: { maxDayHours: 10, maxGapHours: 4, minDayHours: 3, needTol: 1 },
+  settings: { maxDayHours: 10, maxGapHours: 2, minDayHours: 3, needTol: 1, minRestHours: 11, ver: 2 },
   needs: {}, rules: {},
   sub: 'needs', ruleEmp: '', week: null,
   self: { empId: null, buf: '', err: '' },
@@ -31,7 +31,7 @@ const S = {
   chat: [], pending: null,
   cooldown: {}, keyIdx: 0, keyTest: {}, adminMsg: ''
 };
-
+ 
 /* ---------- petits utilitaires ---------- */
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -65,7 +65,7 @@ function findEmp(x) {
   const s = norm(x);
   return emps().find(e => e.id === x) || emps().find(e => norm(e.name) === s) || emps().find(e => norm(e.name).includes(s) && s.length >= 2);
 }
-
+ 
 /* ============================================================
    INIT
    ============================================================ */
@@ -74,11 +74,13 @@ export async function initIA(ctx) {
   S.week = ctx.isoDate(ctx.mondayOf(new Date()));
   S.keys = await ctx.loadJSON('ia_keys', []);
   S.model = await ctx.loadJSON('ia_model', DEFAULT_MODEL);
-  S.settings = Object.assign({ maxDayHours: 10, maxGapHours: 4, minDayHours: 3, needTol: 1 }, await ctx.loadJSON('ia_settings', {}));
+  const saved = await ctx.loadJSON('ia_settings', {});
+  S.settings = Object.assign({ maxDayHours: 10, maxGapHours: 2, minDayHours: 3, needTol: 1, minRestHours: 11, ver: 2 }, saved);
+  if ((saved.ver || 1) < 2) { S.settings.maxGapHours = 2; S.settings.minRestHours = 11; S.settings.ver = 2; }   // nouvelles règles de logique
   S.needs = await ctx.loadJSON('ia_needs', {});
   await Promise.all(ctx.state.employees.map(async e => { S.rules[e.id] = await ctx.loadJSON('ia_rules_' + e.id, []); }));
 }
-
+ 
 /* ============================================================
    RÈGLES (contraintes)
    ============================================================ */
@@ -118,7 +120,7 @@ function normalizeRule(raw, by) {
   }
   return r;
 }
-
+ 
 function describeRule(r) {
   const dn = r.days.map(d => DAYS_FULL[d].slice(0, 3)).join(', ');
   const per = r.from ? (r.to && r.to !== r.from ? `du ${fr(r.from)} au ${fr(r.to)}` : `le ${fr(r.from)}`) : (r.to ? `jusqu'au ${fr(r.to)}` : '');
@@ -135,14 +137,14 @@ function describeRule(r) {
     default: return `Préférence : ${r.note}`;
   }
 }
-
+ 
 function applies(r, dateStr, dayKey) {
   if (r.from && dateStr < r.from) return false;
   if (r.to && dateStr > r.to) return false;
   if (r.days && r.days.length && !r.days.includes(dayKey)) return false;
   return true;
 }
-
+ 
 /* contraintes d'un employé pour une date donnée */
 function dayInfo(empId, dateStr, dayKey) {
   const info = { off: null, fixed: null, forbidDay: false, forbidSlots: new Set(), mustDay: false, mustSlots: new Set(),
@@ -162,7 +164,7 @@ function dayInfo(empId, dateStr, dayKey) {
   });
   return info;
 }
-
+ 
 /* utilisé par app.js pour afficher « Congé » / « Absent » dans le planning existant */
 export function absenceFor(empId, dateStr) {
   if (!C) return null;
@@ -171,7 +173,7 @@ export function absenceFor(empId, dateStr) {
   }
   return null;
 }
-
+ 
 /* ============================================================
    MODÈLE DE PLANNING (créneaux entiers)
    ============================================================ */
@@ -231,7 +233,7 @@ function targetMin(e, dates) {
   dates.forEach((d, i) => { if (i < 5 && dayInfo(e.id, d, C.DAYS[i].key).off) leave++; });
   return Math.round(Number(e.weeklyHours) * 60 * Math.max(0, 1 - leave / 5));
 }
-
+ 
 /* ---------- vérification ---------- */
 function validate(plan) {
   const dates = weekDates(plan.weekKey), sl = slots(), errors = [], warnings = [], tolerated = [], total = {}, remaining = {};
@@ -268,6 +270,11 @@ function validate(plan) {
         if (hit) { const k = d.key + '|' + s.id; (cover[k] = cover[k] || []).push(e.name); }
       });
     });
+    const REST = S.settings.minRestHours * 60;
+    if (REST > 0) for (let i = 0; i < 6; i++) {
+      const a = planSegs(plan, e.id, C.DAYS[i].key), b = planSegs(plan, e.id, C.DAYS[i + 1].key);
+      if (a.length && b.length && 1440 - toMin(a[a.length - 1].end) + toMin(b[0].start) < REST) errors.push(`${e.name} : moins de ${S.settings.minRestHours}h de repos entre ${DAYS_FULL[C.DAYS[i].key]} et ${DAYS_FULL[C.DAYS[i + 1].key]}`);
+    }
     total[e.id] = tot;
     const t = targetMin(e, dates);
     remaining[e.id] = t == null ? null : t - tot;
@@ -290,7 +297,7 @@ function validate(plan) {
   return { errors, warnings, tolerated, total, remaining, over, under };
 }
 const planScore = v => v.errors.length * 1000 + v.tolerated.length * 3 + (v.over / 60) * 20 + (v.under / 60) * 2;
-
+ 
 /* ---------- moteur de répartition (calculateur interne) ---------- */
 function engine(plan) {
   const dates = weekDates(plan.weekKey), sl = slots();
@@ -357,7 +364,7 @@ function engine(plan) {
   }
   return { info, minutes, target, need, cov, canAdd, add, score };
 }
-
+ 
 function solve(weekKey) {
   const plan = newPlan(weekKey); placeFixed(plan);
   const eng = engine(plan), sl = slots();
@@ -395,7 +402,7 @@ function solve(weekKey) {
   plan.source = 'auto';
   return plan;
 }
-
+ 
 /* complète automatiquement les heures restantes (sans dépasser l'objectif, en restant dans besoin + tolérance si possible) */
 function fillRemaining(plan) {
   const eng = engine(plan), sl = slots(); let added = 0;
@@ -420,7 +427,7 @@ function fillRemaining(plan) {
   });
   return added;
 }
-
+ 
 /* ---------- heures EXACTES : on raccourcit / prolonge un début ou une fin de journée ---------- */
 function adjustToTarget(plan) {
   const dates = weekDates(plan.weekKey), sl = slots();
@@ -436,7 +443,7 @@ function adjustToTarget(plan) {
     const adjOf = k => plan.adj[e.id][k] || (plan.adj[e.id][k] = { before: 0, after: 0 });
     const ordered = k => plan.assign[e.id][k].map(slotById).filter(Boolean).sort(byStart);
     const r15 = x => x - (x % 15);
-
+ 
     // retirer (jusqu'à 1/2 créneau par bord) pour redescendre à l'objectif
     const trim = x => {
       const days = worked().sort((a, b) => dayTot(b.key) - dayTot(a.key));
@@ -461,13 +468,21 @@ function adjustToTarget(plan) {
         if (!raw.length) continue;
         const inf = dayInfo(e.id, dates[idx(d.key)], d.key), a = adjOf(d.key);
         const nxt = sl.find(s => s.start === raw[raw.length - 1].end && !ids.includes(s.id) && !inf.forbidSlots.has(s.id));
+        const REST = S.settings.minRestHours * 60, di = idx(d.key);
+        const cur = planSegs(plan, e.id, d.key);
+        let limAfter = Infinity, limBefore = Infinity;
+        if (REST > 0) {
+          const nx = di < 6 ? planSegs(plan, e.id, C.DAYS[di + 1].key) : [], pv = di > 0 ? planSegs(plan, e.id, C.DAYS[di - 1].key) : [];
+          if (nx.length) limAfter = 1440 + toMin(nx[0].start) - REST - toMin(cur[cur.length - 1].end);
+          if (pv.length) limBefore = toMin(cur[0].start) - (REST - 1440 + toMin(pv[pv.length - 1].end));
+        }
         if (nxt) {
-          const take = r15(Math.min(x, slotLen(nxt) - a.after, maxDay - dayTot(d.key)));
+          const take = r15(Math.min(x, slotLen(nxt) - a.after, maxDay - dayTot(d.key), limAfter));
           if (take > 0) { a.after += take; x -= take; }
         }
         const prv = sl.find(s => s.end === raw[0].start && !ids.includes(s.id) && !inf.forbidSlots.has(s.id));
         if (prv && x > 0) {
-          const take = r15(Math.min(x, slotLen(prv) - a.before, maxDay - dayTot(d.key)));
+          const take = r15(Math.min(x, slotLen(prv) - a.before, maxDay - dayTot(d.key), limBefore));
           if (take > 0) { a.before += take; x -= take; }
         }
       }
@@ -505,14 +520,154 @@ function adjustToTarget(plan) {
     }
   });
 }
-/* complète les heures manquantes puis ajuste pour tomber pile sur l'objectif */
+/* ---------- qualité de la répartition (coût à minimiser) ---------- */
+function makeCost(plan) {
+  const dates = weekDates(plan.weekKey), sl = slots(), E = emps();
+  const maxDay = S.settings.maxDayHours * 60, maxGap = S.settings.maxGapHours * 60, TOL = tol(), REST = S.settings.minRestHours * 60;
+  const info = {}, target = {};
+  E.forEach(e => {
+    info[e.id] = {}; target[e.id] = targetMin(e, dates);
+    plan.assign[e.id] = plan.assign[e.id] || {};
+    C.DAYS.forEach((d, i) => { info[e.id][d.key] = dayInfo(e.id, dates[i], d.key); });
+  });
+  const lastId = sl.length ? sl[sl.length - 1].id : null;
+  const isHard = (dk, s) => s.id === lastId || dk === 'sat' || dk === 'sun';
+  const fixedCov = {};
+  E.forEach(e => C.DAYS.forEach(d => {
+    const fx = (plan.fixed[e.id] || {})[d.key]; if (!fx) return;
+    const segs = segsOfFixed(fx);
+    sl.forEach(s => { if (coversSlot(segs, s)) fixedCov[d.key + '|' + s.id] = (fixedCov[d.key + '|' + s.id] || 0) + 1; });
+  }));
+  const sumT = E.reduce((a, e) => a + (target[e.id] || 0), 0);
+  const anyNeed = sl.some(s => C.DAYS.some(d => ((S.needs[s.id] || {})[d.key] || 0) > 0));
+  return function cost() {
+    let c = 0; const cov = Object.assign({}, fixedCov), hardCnt = {};
+    E.forEach(e => {
+      let dw = 0, total = 0, hc = 0; const mins = [], worked = [], edges = [];
+      C.DAYS.forEach(d => {
+        const ids = plan.assign[e.id][d.key] || [], fx = (plan.fixed[e.id] || {})[d.key], inf = info[e.id][d.key];
+        if (fx) { const sg = segsOfFixed(fx), m = segMin(sg); dw++; total += m; mins.push(m); worked.push(true); edges.push([toMin(sg[0].start), toMin(sg[sg.length - 1].end)]); return; }
+        if (!ids.length) {
+          mins.push(0); worked.push(false); edges.push(null);
+          if (!inf.off) { if (inf.mustDay || inf.mustSlots.size) c += 1000; if (inf.wantDay) c += 4; c += inf.wantSlots.size * 3; }
+          return;
+        }
+        dw++; worked.push(true);
+        if (inf.off || inf.forbidDay) c += 1000;
+        ids.forEach(id => {
+          const sx = slotById(id); if (!sx) { c += 1000; return; }
+          cov[d.key + '|' + id] = (cov[d.key + '|' + id] || 0) + 1;
+          if (inf.forbidSlots.has(id)) c += 1000;
+          if (inf.avoidSlots.has(id)) c += 5;
+          if (isHard(d.key, sx)) hc++;
+        });
+        inf.mustSlots.forEach(id => { if (!ids.includes(id)) c += 1000; });
+        inf.wantSlots.forEach(id => { if (!ids.includes(id)) c += 3; });
+        if (inf.avoidDay) c += 4;
+        const segs = segsFromSlotIds(ids);
+        if (segs.length > 2) c += 1000;
+        else if (segs.length === 2) { c += 2; if (toMin(segs[1].start) - toMin(segs[0].end) > maxGap) c += 1000; }
+        const m = segMin(segs); if (m > maxDay) c += 1000;
+        if (!ids.some(id => isMain(slotById(id)))) c += 1000;
+        if (ids.length === 1 && ids[0] === lastId) c += 3;      // éviter les journées « soir seulement »
+        total += m; mins.push(m); edges.push(segs.length ? [toMin(segs[0].start), toMin(segs[segs.length - 1].end)] : null);
+      });
+      if (REST > 0) for (let i = 0; i < 6; i++) { if (edges[i] && edges[i + 1] && 1440 - edges[i][1] + edges[i + 1][0] < REST) c += 1000; }
+      mins.forEach(m => { if (m > 480) c += (m - 480) / 60 * 4; });                // éviter les très longues journées
+      hardCnt[e.id] = hc;
+      const t = target[e.id];
+      if (t != null) {
+        if (total > t) c += (total - t) / 60 * 100; else c += (t - total) / 60 * 3;
+        c += 6 * Math.abs(dw - Math.max(1, Math.min(6, Math.round(t / 390))));   // nombre de jours travaillés raisonnable
+      }
+      if (dw >= 7) c += 30;                                                       // jamais 7 jours sur 7
+      if (dw <= 5) { let adj = false; for (let i = 0; i < 6; i++) if (!worked[i] && !worked[i + 1]) adj = true; if (!adj) c += 4; } // 2 jours de repos collés
+      const w = mins.filter(m => m > 0);
+      if (w.length > 1) { const mean = w.reduce((x, y) => x + y, 0) / w.length; w.forEach(m => { c += ((m - mean) / 60) ** 2 * 1.2; }); } // journées de durées proches
+    });
+    const dayTot = {};
+    sl.forEach(s => C.DAYS.forEach(d => {
+      const need = (S.needs[s.id] || {})[d.key] || 0, n = cov[d.key + '|' + s.id] || 0, mn = minNeed(need);
+      dayTot[d.key] = (dayTot[d.key] || 0) + n;
+      if (n < mn) c += (mn - n) * 60;
+      else if (n < need) c += (need - n) * 12;
+      else if (need > 0 && n > need + TOL) c += (n - need - TOL) * 60;
+      else if (need > 0 && n > need) c += (n - need) * 12;
+    }));
+    if (!anyNeed) {                                                              // sans besoins : répartir les présences sur la semaine
+      const dv = C.DAYS.map(d => dayTot[d.key] || 0), mean = dv.reduce((x, y) => x + y, 0) / 7;
+      dv.forEach(x => { c += (x - mean) ** 2 * 0.5; });
+    }
+    const hT = E.reduce((x, e) => x + (hardCnt[e.id] || 0), 0);                  // soirs / week-ends répartis équitablement
+    E.forEach(e => {
+      const exp = sumT > 0 && target[e.id] != null ? hT * target[e.id] / sumT : hT / E.length;
+      c += 5 * ((hardCnt[e.id] || 0) - exp) ** 2;
+    });
+    return c;
+  };
+}
+ 
+/* recuit simulé : déplace / échange des créneaux pour améliorer la répartition sans casser les règles */
+function optimize(plan, iters = 5000, restarts = 3) {
+  const E = emps(), sl = slots(); if (!E.length || !sl.length) return;
+  const cost = makeCost(plan), rnd = n => Math.floor(Math.random() * n);
+  const fixedAt = (e, k) => !!(plan.fixed[e.id] || {})[k];
+  const snap = () => { const o = {}; E.forEach(e => { o[e.id] = {}; C.DAYS.forEach(d => { o[e.id][d.key] = [...(plan.assign[e.id][d.key] || [])]; }); }); return o; };
+  const restore = o => E.forEach(e => { plan.assign[e.id] = {}; C.DAYS.forEach(d => { if (o[e.id][d.key].length) plan.assign[e.id][d.key] = [...o[e.id][d.key]]; }); });
+  const initial = snap(), deadline = Date.now() + 2500;
+  let gBest = cost(), gSnap = snap();
+  for (let r = 0; r < restarts; r++) {
+    if (r > 0 && Date.now() > deadline) break;
+    restore(initial);
+    let cur = cost();
+    for (let it = 0; it < iters; it++) {
+      if (it % 100 === 0 && Date.now() > deadline) break;
+      const T = Math.max(0.05, 3 * (1 - it / iters));
+      const cells = [];
+      E.forEach(e => C.DAYS.forEach(d => { if (fixedAt(e, d.key)) return; (plan.assign[e.id][d.key] || []).forEach(id => cells.push([e, d.key, id])); }));
+      if (!cells.length) break;
+      const dice = Math.random(); let undo;
+      const get = (e, k) => [...(plan.assign[e.id][k] || [])];
+      const set = (e, k, arr) => { plan.assign[e.id][k] = arr; };
+      if (dice < 0.4) {                                   // confier le créneau à quelqu'un d'autre
+        const [e1, dk, id] = cells[rnd(cells.length)], e2 = E[rnd(E.length)];
+        if (e2 === e1 || fixedAt(e2, dk)) continue;
+        const o1 = get(e1, dk), o2 = get(e2, dk); if (o2.includes(id)) continue;
+        set(e1, dk, o1.filter(x => x !== id)); set(e2, dk, [...o2, id]);
+        undo = () => { set(e1, dk, o1); set(e2, dk, o2); };
+      } else if (dice < 0.8) {                            // déplacer le créneau de la personne vers un autre jour / créneau
+        const [e, dk, id] = cells[rnd(cells.length)], d2 = C.DAYS[rnd(7)].key, s2 = sl[rnd(sl.length)].id;
+        if (fixedAt(e, d2) || (d2 === dk && s2 === id)) continue;
+        const o1 = get(e, dk), o2 = get(e, d2);
+        if ((d2 === dk ? o1 : o2).includes(s2)) continue;
+        if (d2 === dk) set(e, dk, [...o1.filter(x => x !== id), s2]);
+        else { set(e, dk, o1.filter(x => x !== id)); set(e, d2, [...o2, s2]); }
+        undo = () => { set(e, dk, o1); set(e, d2, o2); };
+      } else {                                            // échanger deux journées d'une même personne
+        const e = E[rnd(E.length)], d1 = C.DAYS[rnd(7)].key, d2 = C.DAYS[rnd(7)].key;
+        if (d1 === d2 || fixedAt(e, d1) || fixedAt(e, d2)) continue;
+        const o1 = get(e, d1), o2 = get(e, d2); if (!o1.length && !o2.length) continue;
+        set(e, d1, o2); set(e, d2, o1);
+        undo = () => { set(e, d1, o1); set(e, d2, o2); };
+      }
+      const nc = cost();
+      if (nc <= cur || Math.random() < Math.exp((cur - nc) / T)) { cur = nc; if (cur < gBest) { gBest = cur; gSnap = snap(); } }
+      else undo();
+    }
+  }
+  restore(gSnap);
+  return gBest;
+}
+ 
+/* finalisation : compléter les heures → optimiser la répartition → heures exactes */
 function completePlan(plan) {
   plan.adj = {};
   const n = fillRemaining(plan);
+  optimize(plan);
   adjustToTarget(plan);
   return n;
 }
-
+ 
 /* ============================================================
    GROQ (plusieurs clés, bascule automatique)
    ============================================================ */
@@ -556,7 +711,7 @@ function parseJSON(txt) {
   if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch (e) { /* ignore */ } }
   return null;
 }
-
+ 
 /* ============================================================
    GÉNÉRATION (IA + vérification + secours)
    ============================================================ */
@@ -575,15 +730,16 @@ function planFromAI(weekKey, parsed) {
   plan.source = 'ia';
   return plan;
 }
-
+ 
 async function aiGenerate(weekKey, onStatus) {
   const base = solve(weekKey);
-  let best = { plan: base, v: validate(base), src: 'auto' };
+  const nBase = completePlan(base);
+  const qual = p => makeCost(p)();
+  let best = { plan: base, v: validate(base), src: 'auto', q: qual(base), added: nBase };
   if (!enabledKeys().length) {
-    const n0 = completePlan(best.plan);
-    return { plan: best.plan, src: 'auto', note: 'Aucune clé IA active : génération automatique.' + (n0 ? ` ${n0} créneau(x) ajouté(s) pour atteindre les heures de chacun.` : '') };
+    return { plan: best.plan, src: 'auto', note: 'Aucune clé IA active : génération automatique.' };
   }
-
+ 
   const sl = slots(), fixedPlan = newPlan(weekKey); placeFixed(fixedPlan);
   const eng = engine(fixedPlan);
   const needsLeft = {};
@@ -613,7 +769,7 @@ Règles impératives :
 1. Pour chaque jour et chaque créneau, vise exactement besoinsRestants. Un écart d'une personne en plus ou en moins (tolérance ±${tol()}) est accepté seulement si c'est nécessaire pour respecter les heures de chacun ; ne descends jamais sous le besoin moins la tolérance, et jamais à 0 un créneau demandé à 1 personne.
 2. N'affecte un employé que sur des créneaux listés dans jours[jour].allowed ; jamais un jour "indisponible" ni "horaire fixe".
 3. Respecte doitTravailler et doitTravaillerCreneaux.
-4. Créneaux entiers uniquement. Les créneaux d'une même personne le même jour doivent être collés, ou séparés par une seule coupure de ${S.settings.maxGapHours}h maximum. Chaque journée travaillée contient au moins un bloc entier de matin ou d'après-midi (créneau d'au moins ${S.settings.minDayHours}h : jamais seulement un petit créneau comme « Midi ») et dure ${S.settings.maxDayHours}h au maximum.
+4. Créneaux entiers uniquement. Les créneaux d'une même personne le même jour doivent être collés, ou séparés par une seule coupure de ${S.settings.maxGapHours}h maximum (ex. matin + après-midi). Au moins ${S.settings.minRestHours}h de repos entre la fin d'un jour et le début du suivant (pas de soir suivi d'un matin). Chaque journée travaillée contient au moins un bloc entier de matin ou d'après-midi (créneau d'au moins ${S.settings.minDayHours}h : jamais seulement un petit créneau comme « Midi ») et dure ${S.settings.maxDayHours}h au maximum.
 5. Le total de chaque employé (dejaPlaceMinutes + durée de tes créneaux) ne doit pas dépasser objectifMinutes. Reste en dessous si les besoins sont couverts : les heures restantes seront décidées ensuite.
 Objectifs souples : répartir les jours travaillés sur toute la semaine, répartir équitablement les créneaux du soir et du week-end, respecter prefere / evite / notes.
 Données :
@@ -627,18 +783,17 @@ ${JSON.stringify(data)}`;
     catch (e) { note = 'IA indisponible (' + e.message + ') : génération automatique.'; break; }
     const parsed = parseJSON(raw);
     if (!parsed) { msgs = [...msgs, { role: 'assistant', content: String(raw).slice(0, 2000) }, { role: 'user', content: 'Réponse illisible. Renvoie uniquement le JSON demandé.' }]; continue; }
-    const plan = planFromAI(weekKey, parsed), v = validate(plan);
-    if (planScore(v) <= planScore(best.v)) best = { plan, v, src: 'ia' };
-    if (v.errors.length === 0) break;
+    const plan = planFromAI(weekKey, parsed), vRaw = validate(plan);
+    const nAdd = completePlan(plan), v = validate(plan), q = qual(plan);
+    if (q <= best.q) best = { plan, v, src: 'ia', q, added: nAdd };
+    if (vRaw.errors.length === 0 && v.errors.length === 0) break;
     msgs = [...msgs, { role: 'assistant', content: JSON.stringify(parsed).slice(0, 6000) },
-      { role: 'user', content: 'Ta proposition contient ces erreurs :\n- ' + v.errors.slice(0, 15).join('\n- ') + '\nCorrige-les et renvoie le JSON complet.' }];
+      { role: 'user', content: 'Ta proposition contient ces erreurs :\n- ' + (vRaw.errors.length ? vRaw.errors : v.errors).slice(0, 15).join('\n- ') + '\nCorrige-les et renvoie le JSON complet.' }];
   }
   if (best.src === 'auto' && !note) note = 'L\'IA n\'a pas fait mieux que le calculateur interne : c\'est lui qui a été retenu.';
-  const added = completePlan(best.plan);
-  if (added) note += (note ? ' ' : '') + `${added} créneau(x) ajouté(s) automatiquement ; les heures de chacun sont ajustées pile à leur objectif.`;
   return { plan: best.plan, src: best.src, note };
 }
-
+ 
 async function generateWeek() {
   if (S.busy) return;
   if (!slots().length) { S.status = 'Définissez d\'abord des créneaux horaires dans Admin.'; return C.render(); }
@@ -663,7 +818,7 @@ function remainingText(v) {
   if (!list.length) return '';
   return `\n\nIl reste des heures à placer pour : ${list.join(', ')}.\nOù voulez-vous les mettre ? (ex. « Léa le samedi matin ») — ou cliquez sur « Compléter automatiquement ».`;
 }
-
+ 
 async function applyPlan(silentOverwrite) {
   const p = S.plan; if (!p) return;
   const v = validate(p);
@@ -686,7 +841,7 @@ async function applyPlan(silentOverwrite) {
   S.plan = null;
   C.render();
 }
-
+ 
 /* ============================================================
    CHAT
    ============================================================ */
@@ -812,7 +967,7 @@ export async function iaConfirm() {
   C.render();
 }
 export function iaCancelPending() { S.pending = null; S.chat.push({ role: 'assistant', content: 'D\'accord, j\'annule. Que souhaitez-vous modifier ?' }); refreshChat(); }
-
+ 
 /* ============================================================
    ONGLET ÉQUIPE
    ============================================================ */
@@ -821,7 +976,7 @@ export function renderEquipe() {
   if (C.canEditPlanning()) return renderEditor();
   return renderPublic();
 }
-
+ 
 /* ----- accès employé (code personnel) ----- */
 function renderPublic() {
   const lock = `
@@ -879,7 +1034,7 @@ export function iaPinPress(d) {
 export function iaPinBack() { S.self.buf = S.self.buf.slice(0, -1); C.render(); }
 export function iaPinClear() { S.self.buf = ''; C.render(); }
 export function iaLogout() { S.self.empId = null; S.self.buf = ''; C.render(); }
-
+ 
 /* ----- espace responsable ----- */
 function renderEditor() {
   const tabs = [['needs', 'Besoins'], ['rules', 'Contraintes'], ['gen', 'Planning IA']];
@@ -888,7 +1043,7 @@ function renderEditor() {
   return `${seg}<div style="height:14px"></div>${body}`;
 }
 export function iaSub(k) { S.sub = k; C.render(); }
-
+ 
 function viewNeeds() {
   const sl = slots();
   if (!sl.length) return `<div class="empty">Aucun créneau défini.<br>Ajoutez-en dans l'onglet Admin (Créneaux horaires).</div>`;
@@ -903,6 +1058,7 @@ function viewNeeds() {
         <div class="time-field"><span class="subtle time-field-label">Bloc minimum : matin ou après-midi entier (h)</span><input type="number" min="1" max="12" id="iaMinDay" value="${st.minDayHours}"></div>
         <div class="time-field"><span class="subtle time-field-label">Journée maximum (h)</span><input type="number" min="1" max="16" id="iaMaxDay" value="${st.maxDayHours}"></div>
         <div class="time-field"><span class="subtle time-field-label">Coupure maximum (h)</span><input type="number" min="0" max="8" id="iaMaxGap" value="${st.maxGapHours}"></div>
+        <div class="time-field"><span class="subtle time-field-label">Repos minimum entre 2 jours (h, 0 = aucun)</span><input type="number" min="0" max="16" id="iaRest" value="${st.minRestHours}"></div>
         <div class="time-field"><span class="subtle time-field-label">Tolérance personnes par créneau (±)</span><input type="number" min="0" max="3" id="iaTol" value="${st.needTol}"></div>
       </div>
       <div class="subtle" style="margin-bottom:10px;">Un employé qui travaille fait toujours au moins un créneau d'au moins cette durée (ex. tout le matin ou tout l'après-midi), jamais « Midi » seul. Le planning est toujours proposé, même s'il reste des trous : ils sont listés.</div>
@@ -915,12 +1071,12 @@ export async function iaSaveNeeds() {
   slots().forEach(s => { needs[s.id] = {}; C.DAYS.forEach(d => { const v = parseInt($('need_' + s.id + '_' + d.key).value, 10); needs[s.id][d.key] = isNaN(v) || v < 0 ? 0 : v; }); });
   const num = (id, def) => { const v = parseFloat($(id).value); return isNaN(v) || v <= 0 ? def : v; };
   S.needs = needs;
-  S.settings = { minDayHours: num('iaMinDay', 3), maxDayHours: num('iaMaxDay', 10), maxGapHours: Math.max(0, parseFloat($('iaMaxGap').value) || 0), needTol: Math.max(0, Math.min(3, isNaN(parseInt($('iaTol').value, 10)) ? 1 : parseInt($('iaTol').value, 10))) };
+  S.settings = { minDayHours: num('iaMinDay', 3), maxDayHours: num('iaMaxDay', 10), maxGapHours: Math.max(0, parseFloat($('iaMaxGap').value) || 0), minRestHours: Math.max(0, parseFloat($('iaRest').value) || 0), ver: 2, needTol: Math.max(0, Math.min(3, isNaN(parseInt($('iaTol').value, 10)) ? 1 : parseInt($('iaTol').value, 10))) };
   await C.saveJSON('ia_needs', S.needs);
   await C.saveJSON('ia_settings', S.settings);
   const m = $('iaNeedsMsg'); if (m) m.textContent = 'Enregistré ✓';
 }
-
+ 
 function viewRules() {
   if (!emps().length) return `<div class="empty">Aucun employé.<br>Ajoutez des employés dans l'onglet Admin.</div>`;
   let e = emps().find(x => x.id === S.ruleEmp); if (!e) { e = emps()[0]; S.ruleEmp = e.id; }
@@ -939,7 +1095,7 @@ export async function iaDeleteRule(empId, ruleId) {
   S.rules[empId] = rulesOf(empId).filter(x => x.id !== ruleId);
   await saveRules(empId); C.render();
 }
-
+ 
 function ruleForm(mode, empId) {
   const types = mode === 'employee' ? ['conge', 'absent', 'travaille', 'non_travaille', 'pref'] : TYPES;
   const lab = mode === 'employee' ? TYPE_LABEL_EMP : TYPE_LABEL_ADMIN;
@@ -983,7 +1139,7 @@ export async function iaSaveRule(empId, mode) {
   if (typeof r === 'string') { $('irErr').textContent = r; return; }
   rulesOf(empId).push(r); await saveRules(empId); C.render();
 }
-
+ 
 /* ----- génération + chat ----- */
 function viewGen() {
   const monday = C.mondayOf(new Date(S.week + 'T00:00:00')), wk = C.isoDate(monday);
@@ -1052,7 +1208,7 @@ export function iaFill() {
   S.chat.push({ role: 'assistant', content: `${n} créneau(x) ajouté(s) automatiquement.` + remainingText(validate(S.plan)) });
   C.render();
 }
-
+ 
 /* ============================================================
    ADMIN : clés Groq + modèle
    ============================================================ */
@@ -1125,13 +1281,13 @@ export async function iaTestKeys() {
   S.adminMsg = modelOk === false ? `⚠️ Le modèle « ${S.model} » n'existe pas (plus) chez Groq : changez-le ci-dessus.` : (modelOk ? 'Test terminé ✓ (modèle disponible)' : 'Test terminé.');
   C.render();
 }
-
+ 
 /* appelé par app.js après chaque rendu */
 export function afterRender() {
   if ($('ir_type')) iaRuleTypeChange();
   const l = $('iaChatLog'); if (l) l.scrollTop = l.scrollHeight;
 }
-
+ 
 /* fonctions utilisées par les onclick="" du HTML */
 if (typeof window !== 'undefined') {
   Object.assign(window, {
@@ -1141,6 +1297,7 @@ if (typeof window !== 'undefined') {
     iaAddKeys, iaToggleKey, iaDeleteKey, iaSaveModel, iaTestKeys
   });
 }
-
+ 
 /* pour les tests */
-export const _test = { adjustToTarget, completePlan, aiGenerate, solve, validate, normalizeRule, fillRemaining, S, planSegs, dayObjFromSegs, targetMin, planFromAI, parseJSON };
+export const _test = { makeCost, optimize, adjustToTarget, completePlan, aiGenerate, solve, validate, normalizeRule, fillRemaining, S, planSegs, dayObjFromSegs, targetMin, planFromAI, parseJSON };
+ 
