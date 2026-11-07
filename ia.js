@@ -4,10 +4,12 @@
    continue de fonctionner normalement (sans l'onglet Équipe).
    ============================================================ */
 let C = null; // contexte fourni par app.js
- 
+
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const GROQ_MODELS_URL = 'https://api.groq.com/openai/v1/models';
-const DEFAULT_MODEL = 'llama-3.3-70b-versatile';
+const DEFAULT_MODEL = 'openai/gpt-oss-120b';
+/* modèles retirés par Groq : remplacés automatiquement par le modèle par défaut */
+const RETIRED_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it', 'llama3-70b-8192', 'llama3-8b-8192'];
 const DAYS_FULL = { mon:'Lundi', tue:'Mardi', wed:'Mercredi', thu:'Jeudi', fri:'Vendredi', sat:'Samedi', sun:'Dimanche' };
 const DAY_ALIASES = { lundi:'mon', lun:'mon', mardi:'tue', mar:'tue', mercredi:'wed', mer:'wed', jeudi:'thu', jeu:'thu', vendredi:'fri', ven:'fri', samedi:'sat', sam:'sat', dimanche:'sun', dim:'sun' };
 const TYPES = ['conge','absent','fixe','travaille','non_travaille','pref'];
@@ -20,7 +22,7 @@ const TYPE_LABEL_EMP = {
   conge:'Congé', absent:'Je suis absent(e)', travaille:'Je souhaite travailler',
   non_travaille:'Je préfère ne pas travailler', pref:'Autre remarque / préférence'
 };
- 
+
 const S = {
   keys: [], model: DEFAULT_MODEL,
   settings: { maxDayHours: 10, maxGapHours: 2, minDayHours: 3, needTol: 1, minRestHours: 11, ver: 2 },
@@ -31,7 +33,7 @@ const S = {
   chat: [], pending: null,
   cooldown: {}, keyIdx: 0, keyTest: {}, adminMsg: ''
 };
- 
+
 /* ---------- petits utilitaires ---------- */
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -65,7 +67,7 @@ function findEmp(x) {
   const s = norm(x);
   return emps().find(e => e.id === x) || emps().find(e => norm(e.name) === s) || emps().find(e => norm(e.name).includes(s) && s.length >= 2);
 }
- 
+
 /* ============================================================
    INIT
    ============================================================ */
@@ -74,13 +76,14 @@ export async function initIA(ctx) {
   S.week = ctx.isoDate(ctx.mondayOf(new Date()));
   S.keys = await ctx.loadJSON('ia_keys', []);
   S.model = await ctx.loadJSON('ia_model', DEFAULT_MODEL);
+  if (!S.model || RETIRED_MODELS.includes(S.model)) { S.model = DEFAULT_MODEL; await ctx.saveJSON('ia_model', S.model); }
   const saved = await ctx.loadJSON('ia_settings', {});
   S.settings = Object.assign({ maxDayHours: 10, maxGapHours: 2, minDayHours: 3, needTol: 1, minRestHours: 11, ver: 2 }, saved);
   if ((saved.ver || 1) < 2) { S.settings.maxGapHours = 2; S.settings.minRestHours = 11; S.settings.ver = 2; }   // nouvelles règles de logique
   S.needs = await ctx.loadJSON('ia_needs', {});
   await Promise.all(ctx.state.employees.map(async e => { S.rules[e.id] = await ctx.loadJSON('ia_rules_' + e.id, []); }));
 }
- 
+
 /* ============================================================
    RÈGLES (contraintes)
    ============================================================ */
@@ -120,7 +123,7 @@ function normalizeRule(raw, by) {
   }
   return r;
 }
- 
+
 function describeRule(r) {
   const dn = r.days.map(d => DAYS_FULL[d].slice(0, 3)).join(', ');
   const per = r.from ? (r.to && r.to !== r.from ? `du ${fr(r.from)} au ${fr(r.to)}` : `le ${fr(r.from)}`) : (r.to ? `jusqu'au ${fr(r.to)}` : '');
@@ -137,14 +140,14 @@ function describeRule(r) {
     default: return `Préférence : ${r.note}`;
   }
 }
- 
+
 function applies(r, dateStr, dayKey) {
   if (r.from && dateStr < r.from) return false;
   if (r.to && dateStr > r.to) return false;
   if (r.days && r.days.length && !r.days.includes(dayKey)) return false;
   return true;
 }
- 
+
 /* contraintes d'un employé pour une date donnée */
 function dayInfo(empId, dateStr, dayKey) {
   const info = { off: null, fixed: null, forbidDay: false, forbidSlots: new Set(), mustDay: false, mustSlots: new Set(),
@@ -164,7 +167,7 @@ function dayInfo(empId, dateStr, dayKey) {
   });
   return info;
 }
- 
+
 /* utilisé par app.js pour afficher « Congé » / « Absent » dans le planning existant */
 export function absenceFor(empId, dateStr) {
   if (!C) return null;
@@ -173,7 +176,7 @@ export function absenceFor(empId, dateStr) {
   }
   return null;
 }
- 
+
 /* ============================================================
    MODÈLE DE PLANNING (créneaux entiers)
    ============================================================ */
@@ -233,7 +236,7 @@ function targetMin(e, dates) {
   dates.forEach((d, i) => { if (i < 5 && dayInfo(e.id, d, C.DAYS[i].key).off) leave++; });
   return Math.round(Number(e.weeklyHours) * 60 * Math.max(0, 1 - leave / 5));
 }
- 
+
 /* ---------- vérification ---------- */
 function validate(plan) {
   const dates = weekDates(plan.weekKey), sl = slots(), errors = [], warnings = [], tolerated = [], total = {}, remaining = {};
@@ -297,7 +300,7 @@ function validate(plan) {
   return { errors, warnings, tolerated, total, remaining, over, under };
 }
 const planScore = v => v.errors.length * 1000 + v.tolerated.length * 3 + (v.over / 60) * 20 + (v.under / 60) * 2;
- 
+
 /* ---------- moteur de répartition (calculateur interne) ---------- */
 function engine(plan) {
   const dates = weekDates(plan.weekKey), sl = slots();
@@ -364,7 +367,7 @@ function engine(plan) {
   }
   return { info, minutes, target, need, cov, canAdd, add, score };
 }
- 
+
 function solve(weekKey) {
   const plan = newPlan(weekKey); placeFixed(plan);
   const eng = engine(plan), sl = slots();
@@ -402,7 +405,7 @@ function solve(weekKey) {
   plan.source = 'auto';
   return plan;
 }
- 
+
 /* complète automatiquement les heures restantes (sans dépasser l'objectif, en restant dans besoin + tolérance si possible) */
 function fillRemaining(plan) {
   const eng = engine(plan), sl = slots(); let added = 0;
@@ -427,7 +430,7 @@ function fillRemaining(plan) {
   });
   return added;
 }
- 
+
 /* ---------- heures EXACTES : on raccourcit / prolonge un début ou une fin de journée ---------- */
 function adjustToTarget(plan) {
   const dates = weekDates(plan.weekKey), sl = slots();
@@ -443,7 +446,7 @@ function adjustToTarget(plan) {
     const adjOf = k => plan.adj[e.id][k] || (plan.adj[e.id][k] = { before: 0, after: 0 });
     const ordered = k => plan.assign[e.id][k].map(slotById).filter(Boolean).sort(byStart);
     const r15 = x => x - (x % 15);
- 
+
     // retirer (jusqu'à 1/2 créneau par bord) pour redescendre à l'objectif
     const trim = x => {
       const days = worked().sort((a, b) => dayTot(b.key) - dayTot(a.key));
@@ -606,7 +609,7 @@ function makeCost(plan) {
     return c;
   };
 }
- 
+
 /* recuit simulé : déplace / échange des créneaux pour améliorer la répartition sans casser les règles */
 function optimize(plan, iters = 5000, restarts = 3) {
   const E = emps(), sl = slots(); if (!E.length || !sl.length) return;
@@ -658,7 +661,7 @@ function optimize(plan, iters = 5000, restarts = 3) {
   restore(gSnap);
   return gBest;
 }
- 
+
 /* finalisation : compléter les heures → optimiser la répartition → heures exactes */
 function completePlan(plan) {
   plan.adj = {};
@@ -667,10 +670,24 @@ function completePlan(plan) {
   adjustToTarget(plan);
   return n;
 }
- 
+
 /* ============================================================
    GROQ (plusieurs clés, bascule automatique)
    ============================================================ */
+/* demande à Groq la liste des modèles disponibles avec cette clé et choisit le meilleur modèle texte */
+function chooseModel(ids) {
+  const ok = ids.filter(id => !/whisper|guard|tts|embed|orpheus|safeguard|playai|distil/i.test(id));
+  for (const pref of ['openai/gpt-oss-120b', 'openai/gpt-oss-20b']) if (ok.includes(pref)) return pref;
+  return ok.find(id => /gpt-oss|llama|qwen|kimi|maverick|scout/i.test(id)) || null;
+}
+async function pickModel(keyStr) {
+  try {
+    const r = await fetch(GROQ_MODELS_URL, { headers: { Authorization: 'Bearer ' + keyStr } });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return chooseModel((d.data || []).filter(m => m.active !== false).map(m => m.id));
+  } catch (e) { return null; }
+}
 const enabledKeys = () => S.keys.filter(k => k.enabled !== false && k.key);
 async function callGroq(messages, opts = {}) {
   const ks = enabledKeys();
@@ -682,6 +699,7 @@ async function callGroq(messages, opts = {}) {
     try {
       const body = { model: S.model || DEFAULT_MODEL, messages, temperature: opts.temperature ?? 0.3 };
       if (opts.json) body.response_format = { type: 'json_object' };
+      if (/gpt-oss/.test(body.model)) body.reasoning_effort = 'low';
       const r = await fetch(GROQ_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + k.key }, body: JSON.stringify(body) });
       if (r.status === 429 || r.status === 401 || r.status === 403 || r.status >= 500) {
         S.cooldown[k.id] = Date.now() + (r.status === 429 ? 60000 : 300000);
@@ -691,6 +709,10 @@ async function callGroq(messages, opts = {}) {
       if (!r.ok) {
         if (r.status === 400 && opts.json) return callGroq(messages, { ...opts, json: false });
         const tx = await r.text();
+        if ((r.status === 404 || /model_not_found|does not exist/i.test(tx)) && !opts._retriedModel) {   // modèle retiré : on en choisit un valide
+          const m = await pickModel(k.key);
+          if (m && m !== S.model) { S.model = m; await C.saveJSON('ia_model', m); S.adminMsg = `Modèle remplacé automatiquement par ${m}.`; return callGroq(messages, { ...opts, _retriedModel: true }); }
+        }
         throw new Error('Groq ' + r.status + ' : ' + tx.slice(0, 200));
       }
       const data = await r.json();
@@ -711,7 +733,7 @@ function parseJSON(txt) {
   if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch (e) { /* ignore */ } }
   return null;
 }
- 
+
 /* ============================================================
    GÉNÉRATION (IA + vérification + secours)
    ============================================================ */
@@ -730,7 +752,7 @@ function planFromAI(weekKey, parsed) {
   plan.source = 'ia';
   return plan;
 }
- 
+
 async function aiGenerate(weekKey, onStatus) {
   const base = solve(weekKey);
   const nBase = completePlan(base);
@@ -739,7 +761,7 @@ async function aiGenerate(weekKey, onStatus) {
   if (!enabledKeys().length) {
     return { plan: best.plan, src: 'auto', note: 'Aucune clé IA active : génération automatique.' };
   }
- 
+
   const sl = slots(), fixedPlan = newPlan(weekKey); placeFixed(fixedPlan);
   const eng = engine(fixedPlan);
   const needsLeft = {};
@@ -793,7 +815,7 @@ ${JSON.stringify(data)}`;
   if (best.src === 'auto' && !note) note = 'L\'IA n\'a pas fait mieux que le calculateur interne : c\'est lui qui a été retenu.';
   return { plan: best.plan, src: best.src, note };
 }
- 
+
 async function generateWeek() {
   if (S.busy) return;
   if (!slots().length) { S.status = 'Définissez d\'abord des créneaux horaires dans Admin.'; return C.render(); }
@@ -818,7 +840,7 @@ function remainingText(v) {
   if (!list.length) return '';
   return `\n\nIl reste des heures à placer pour : ${list.join(', ')}.\nOù voulez-vous les mettre ? (ex. « Léa le samedi matin ») — ou cliquez sur « Compléter automatiquement ».`;
 }
- 
+
 async function applyPlan(silentOverwrite) {
   const p = S.plan; if (!p) return;
   const v = validate(p);
@@ -841,7 +863,7 @@ async function applyPlan(silentOverwrite) {
   S.plan = null;
   C.render();
 }
- 
+
 /* ============================================================
    CHAT
    ============================================================ */
@@ -967,7 +989,7 @@ export async function iaConfirm() {
   C.render();
 }
 export function iaCancelPending() { S.pending = null; S.chat.push({ role: 'assistant', content: 'D\'accord, j\'annule. Que souhaitez-vous modifier ?' }); refreshChat(); }
- 
+
 /* ============================================================
    ONGLET ÉQUIPE
    ============================================================ */
@@ -976,7 +998,7 @@ export function renderEquipe() {
   if (C.canEditPlanning()) return renderEditor();
   return renderPublic();
 }
- 
+
 /* ----- accès employé (code personnel) ----- */
 function renderPublic() {
   const lock = `
@@ -1034,7 +1056,7 @@ export function iaPinPress(d) {
 export function iaPinBack() { S.self.buf = S.self.buf.slice(0, -1); C.render(); }
 export function iaPinClear() { S.self.buf = ''; C.render(); }
 export function iaLogout() { S.self.empId = null; S.self.buf = ''; C.render(); }
- 
+
 /* ----- espace responsable ----- */
 function renderEditor() {
   const tabs = [['needs', 'Besoins'], ['rules', 'Contraintes'], ['gen', 'Planning IA']];
@@ -1043,7 +1065,7 @@ function renderEditor() {
   return `${seg}<div style="height:14px"></div>${body}`;
 }
 export function iaSub(k) { S.sub = k; C.render(); }
- 
+
 function viewNeeds() {
   const sl = slots();
   if (!sl.length) return `<div class="empty">Aucun créneau défini.<br>Ajoutez-en dans l'onglet Admin (Créneaux horaires).</div>`;
@@ -1076,7 +1098,7 @@ export async function iaSaveNeeds() {
   await C.saveJSON('ia_settings', S.settings);
   const m = $('iaNeedsMsg'); if (m) m.textContent = 'Enregistré ✓';
 }
- 
+
 function viewRules() {
   if (!emps().length) return `<div class="empty">Aucun employé.<br>Ajoutez des employés dans l'onglet Admin.</div>`;
   let e = emps().find(x => x.id === S.ruleEmp); if (!e) { e = emps()[0]; S.ruleEmp = e.id; }
@@ -1095,7 +1117,7 @@ export async function iaDeleteRule(empId, ruleId) {
   S.rules[empId] = rulesOf(empId).filter(x => x.id !== ruleId);
   await saveRules(empId); C.render();
 }
- 
+
 function ruleForm(mode, empId) {
   const types = mode === 'employee' ? ['conge', 'absent', 'travaille', 'non_travaille', 'pref'] : TYPES;
   const lab = mode === 'employee' ? TYPE_LABEL_EMP : TYPE_LABEL_ADMIN;
@@ -1139,7 +1161,7 @@ export async function iaSaveRule(empId, mode) {
   if (typeof r === 'string') { $('irErr').textContent = r; return; }
   rulesOf(empId).push(r); await saveRules(empId); C.render();
 }
- 
+
 /* ----- génération + chat ----- */
 function viewGen() {
   const monday = C.mondayOf(new Date(S.week + 'T00:00:00')), wk = C.isoDate(monday);
@@ -1208,7 +1230,7 @@ export function iaFill() {
   S.chat.push({ role: 'assistant', content: `${n} créneau(x) ajouté(s) automatiquement.` + remainingText(validate(S.plan)) });
   C.render();
 }
- 
+
 /* ============================================================
    ADMIN : clés Groq + modèle
    ============================================================ */
@@ -1274,20 +1296,24 @@ export async function iaTestKeys() {
       const r = await fetch(GROQ_MODELS_URL, { headers: { Authorization: 'Bearer ' + k.key } });
       if (r.ok) {
         const d = await r.json(); S.keyTest[k.id] = { ok: true, msg: '✓ valide' };
-        if (modelOk == null) modelOk = (d.data || []).some(m => m.id === S.model);
+        if (modelOk == null) {
+          const ids = (d.data || []).filter(m => m.active !== false).map(m => m.id);
+          modelOk = ids.includes(S.model);
+          if (!modelOk) { const m = chooseModel(ids); if (m) { S.model = m; await C.saveJSON('ia_model', m); modelOk = 'fixed'; } }
+        }
       } else S.keyTest[k.id] = { ok: false, msg: '✗ erreur ' + r.status };
     } catch (e) { S.keyTest[k.id] = { ok: false, msg: '✗ ' + e.message }; }
   }
-  S.adminMsg = modelOk === false ? `⚠️ Le modèle « ${S.model} » n'existe pas (plus) chez Groq : changez-le ci-dessus.` : (modelOk ? 'Test terminé ✓ (modèle disponible)' : 'Test terminé.');
+  S.adminMsg = modelOk === 'fixed' ? `Modèle indisponible : remplacé automatiquement par ${S.model} ✓` : modelOk === false ? `⚠️ Le modèle « ${S.model} » n'existe pas (plus) chez Groq : changez-le ci-dessus.` : (modelOk ? 'Test terminé ✓ (modèle disponible)' : 'Test terminé.');
   C.render();
 }
- 
+
 /* appelé par app.js après chaque rendu */
 export function afterRender() {
   if ($('ir_type')) iaRuleTypeChange();
   const l = $('iaChatLog'); if (l) l.scrollTop = l.scrollHeight;
 }
- 
+
 /* fonctions utilisées par les onclick="" du HTML */
 if (typeof window !== 'undefined') {
   Object.assign(window, {
@@ -1297,7 +1323,6 @@ if (typeof window !== 'undefined') {
     iaAddKeys, iaToggleKey, iaDeleteKey, iaSaveModel, iaTestKeys
   });
 }
- 
+
 /* pour les tests */
-export const _test = { makeCost, optimize, adjustToTarget, completePlan, aiGenerate, solve, validate, normalizeRule, fillRemaining, S, planSegs, dayObjFromSegs, targetMin, planFromAI, parseJSON };
- 
+export const _test = { callGroq, chooseModel, makeCost, optimize, adjustToTarget, completePlan, aiGenerate, solve, validate, normalizeRule, fillRemaining, S, planSegs, dayObjFromSegs, targetMin, planFromAI, parseJSON };
